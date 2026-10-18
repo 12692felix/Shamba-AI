@@ -1,0 +1,23 @@
+@echo off
+title SHAMBA AI Master Launcher
+echo ===================================================
+echo Starting SHAMBA AI - Crop Intelligence Platform
+echo ===================================================
+echo.
+
+echo [1/3] Booting up Python Backend...
+start "SHAMBA AI Backend" cmd /k "cd /d "C:\Users\irene_000\Desktop\Shamba AI\backend" && .\.venv\Scripts\activate && uvicorn app.main:app --reload"
+
+echo [2/3] Booting up React Frontend...
+start "SHAMBA AI Frontend" cmd /k "cd /d "C:\Users\irene_000\Desktop\Shamba AI\frontend" && npm run dev"
+
+echo [3/3] Waiting for servers to initialize...
+timeout /t 5 /nobreak >nul
+
+echo.
+echo Opening dashboard in your browser...
+start http://localhost:5173
+
+echo.
+echo All systems go! You can close this master window.
+pause
