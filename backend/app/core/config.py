@@ -12,7 +12,7 @@ WESTERN_KENYA_COUNTIES = {
     "Kakamega": {
         "center": [34.75, 0.28],
         "bounds": [[34.70, 0.35], [34.80, 0.35], [34.80, 0.20], [34.70, 0.20]],
-        "observations": {} 
+        "observations": {} # Empty until you process data
     },
     "Busia": {
         "center": [34.11, 0.46],

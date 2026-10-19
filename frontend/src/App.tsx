@@ -13,44 +13,78 @@ interface NDVIStats {
   valid_percentage: number;
 }
 
+interface CountyData {
+  name: string;
+  center: [number, number];
+  bounds: [[number, number], [number, number], [number, number], [number, number]];
+  available_dates: string[];
+}
+
 function App() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   
-  const [availableDates, setAvailableDates] = useState<string[]>([]);
-  const [selectedDate, setSelectedDate] = useState<string>("Jan 2024");
+  const [counties, setCounties] = useState<CountyData[]>([]);
+  const [selectedCounty, setSelectedCounty] = useState<string>("Bungoma");
+  const [selectedDate, setSelectedDate] = useState<string>("");
   
   const [stats, setStats] = useState<NDVIStats | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   
   const [opacity, setOpacity] = useState<number>(0.8);
   const [showAnomalies, setShowAnomalies] = useState<boolean>(false);
 
-  // 1. Fetch available dates
+  // 1. Fetch available counties on mount
   useEffect(() => {
-    // Using localhost instead of 127.0.0.1 to prevent Chrome pending issues
-    fetch('http://localhost:8000/api/v1/observations')
+    fetch('http://localhost:8000/api/v1/counties')
       .then((res) => res.json())
-      .then((data) => setAvailableDates(data))
-      .catch((err) => console.error("Failed to load dates:", err));
+      .then((data) => {
+        setCounties(data);
+      })
+      .catch((err) => console.error("Failed to load counties:", err));
   }, []);
 
-  // 2. Fetch statistics when date changes
+  const activeCounty = counties.find(c => c.name === selectedCounty);
+  const hasData = activeCounty && activeCounty.available_dates.length > 0;
+
+  // 2. Set default date when county changes
   useEffect(() => {
+    if (activeCounty && activeCounty.available_dates.length > 0) {
+      setSelectedDate(activeCounty.available_dates[0]); 
+    } else {
+      setSelectedDate("");
+      setStats(null);
+    }
+  }, [selectedCounty, activeCounty]);
+
+  // 3. Fetch statistics when county or date changes
+  useEffect(() => {
+    if (!selectedCounty || !selectedDate || !hasData) return;
+    
     setIsLoading(true);
-    fetch(`http://localhost:8000/api/v1/ndvi-statistics?date=${encodeURIComponent(selectedDate)}`)
-      .then((res) => res.json())
+    setStatsError(null);
+    
+    fetch(`http://localhost:8000/api/v1/ndvi-statistics?county=${encodeURIComponent(selectedCounty)}&date=${encodeURIComponent(selectedDate)}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail || "Failed to load stats");
+        }
+        return res.json();
+      })
       .then((data) => {
         setStats(data);
         setIsLoading(false);
       })
       .catch((err) => {
-        console.error(err);
+        setStatsError(err.message);
+        setStats(null);
         setIsLoading(false);
       });
-  }, [selectedDate]);
+  }, [selectedCounty, selectedDate, hasData]);
 
-  // 3. Initialize Map
+  // 4. Initialize Map
   useEffect(() => {
     if (map.current) return; 
 
@@ -58,79 +92,87 @@ function App() {
       container: mapContainer.current!,
       style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json', 
       center: [34.575, 0.575], 
-      zoom: 13,
-    });
-
-    map.current.on('load', () => {
-      if (!map.current) return;
-      
-      // Find label layer to put map underneath
-      const layers = map.current.getStyle().layers;
-      let firstSymbolId: string | undefined;
-      if (layers) {
-        for (const layer of layers) {
-          if (layer.type === 'symbol') { firstSymbolId = layer.id; break; }
-        }
-      }
-
-      // Add NDVI Source
-      map.current.addSource('ndvi-raster', {
-        type: 'image',
-        url: `http://localhost:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`,
-        coordinates: [
-          [34.55, 0.60], // Top Left
-          [34.60, 0.60], // Top Right
-          [34.60, 0.55], // Bottom Right
-          [34.55, 0.55]  // Bottom Left
-        ]
-      });
-
-      map.current.addLayer({
-        id: 'ndvi-layer',
-        type: 'raster',
-        source: 'ndvi-raster',
-        paint: { 'raster-opacity': opacity }
-      }, firstSymbolId);
-
-      // Add Anomaly Source
-      map.current.addSource('anomaly-raster', {
-        type: 'image',
-        url: 'http://localhost:8000/api/v1/ndvi-anomaly',
-        coordinates: [
-          [34.55, 0.60],
-          [34.60, 0.60],
-          [34.60, 0.55],
-          [34.55, 0.55]
-        ]
-      });
-
-      map.current.addLayer({
-        id: 'anomaly-layer',
-        type: 'raster',
-        source: 'anomaly-raster',
-        paint: { 'raster-opacity': 0 } // Hidden by default
-      }, firstSymbolId);
+      zoom: 11.5,
     });
   }, []);
 
-  // 4. Update NDVI image when date changes
+  // 5. Update Map (Camera + Layers)
   useEffect(() => {
-    if (map.current && map.current.getSource('ndvi-raster')) {
-      const source = map.current.getSource('ndvi-raster') as maplibregl.ImageSource;
-      source.updateImage({
-        url: `http://localhost:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`
-      });
-    }
-  }, [selectedDate]);
+    if (!map.current) return;
 
-  // 5. Handle Opacity
+    const updateMap = () => {
+      if (!map.current) return;
+
+      // Handle Camera FlyTo
+      if (selectedCounty === "Western Kenya") {
+        map.current.flyTo({ center: [34.4, 0.3], zoom: 7.5, essential: true });
+      } else if (activeCounty) {
+        map.current.flyTo({ center: activeCounty.center, zoom: 11.5, essential: true });
+      }
+
+      // Clean up existing layers
+      ['ndvi-layer', 'anomaly-layer'].forEach(id => {
+        if (map.current?.getLayer(id)) map.current.removeLayer(id);
+      });
+      ['ndvi-raster', 'anomaly-raster'].forEach(id => {
+        if (map.current?.getSource(id)) map.current.removeSource(id);
+      });
+
+      // Add new layers if data exists
+      if (hasData && activeCounty && selectedDate) {
+        const layers = map.current.getStyle().layers;
+        let firstSymbolId: string | undefined;
+        if (layers) {
+          for (const layer of layers) {
+            if (layer.type === 'symbol') { firstSymbolId = layer.id; break; }
+          }
+        }
+
+        map.current.addSource('ndvi-raster', {
+          type: 'image',
+          url: `http://localhost:8000/api/v1/ndvi-image?county=${encodeURIComponent(selectedCounty)}&date=${encodeURIComponent(selectedDate)}`,
+          coordinates: activeCounty.bounds
+        });
+
+        map.current.addLayer({
+          id: 'ndvi-layer',
+          type: 'raster',
+          source: 'ndvi-raster',
+          paint: { 'raster-opacity': opacity }
+        }, firstSymbolId);
+
+        if (activeCounty.available_dates.length >= 2) {
+          map.current.addSource('anomaly-raster', {
+            type: 'image',
+            url: `http://localhost:8000/api/v1/ndvi-anomaly?county=${encodeURIComponent(selectedCounty)}`,
+            coordinates: activeCounty.bounds
+          });
+
+          map.current.addLayer({
+            id: 'anomaly-layer',
+            type: 'raster',
+            source: 'anomaly-raster',
+            paint: { 'raster-opacity': showAnomalies ? 1 : 0 }
+          }, firstSymbolId);
+        }
+      }
+    };
+
+    if (map.current.isStyleLoaded()) {
+      updateMap();
+    } else {
+      map.current.once('load', updateMap);
+    }
+  }, [selectedCounty, selectedDate, activeCounty, hasData]);
+
+  // Handle opacity
   useEffect(() => {
     if (map.current && map.current.getLayer('ndvi-layer')) {
       map.current.setPaintProperty('ndvi-layer', 'raster-opacity', opacity);
     }
   }, [opacity]);
 
-  // 6. Handle Anomaly Toggle
+  // Handle anomaly toggle
   useEffect(() => {
     if (map.current && map.current.getLayer('anomaly-layer')) {
       map.current.setPaintProperty('anomaly-layer', 'raster-opacity', showAnomalies ? 1 : 0);
@@ -146,16 +188,20 @@ function App() {
         </div>
         
         <div className="flex items-center gap-6">
-          {/* Anomaly Toggle */}
-          <label className="flex items-center gap-2 cursor-pointer bg-gray-800 px-4 py-2 rounded border border-gray-700 hover:bg-gray-700 transition">
-            <input 
-              type="checkbox" 
-              checked={showAnomalies}
-              onChange={(e) => setShowAnomalies(e.target.checked)}
-              className="w-4 h-4 accent-red-500 cursor-pointer"
-            />
-            <span className="text-sm font-bold text-red-400">Show Anomalies</span>
-          </label>
+          {/* County Selector */}
+          <div className="flex items-center gap-2">
+            <label className="text-sm font-semibold text-green-200">County:</label>
+            <select 
+              value={selectedCounty}
+              onChange={(e) => setSelectedCounty(e.target.value)}
+              className="bg-green-800 text-white text-sm px-4 py-2 rounded border border-green-700 focus:outline-none focus:border-green-500 cursor-pointer font-semibold"
+            >
+              <option value="Western Kenya">Western Kenya (Overview)</option>
+              {counties.map(c => (
+                <option key={c.name} value={c.name}>{c.name}</option>
+              ))}
+            </select>
+          </div>
 
           {/* Date Selector */}
           <div className="flex items-center gap-2">
@@ -163,13 +209,30 @@ function App() {
             <select 
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
-              className="bg-green-800 text-white text-sm px-4 py-2 rounded border border-green-700 focus:outline-none focus:border-green-500 cursor-pointer font-semibold"
+              disabled={!hasData}
+              className="bg-green-800 text-white text-sm px-4 py-2 rounded border border-green-700 focus:outline-none focus:border-green-500 cursor-pointer font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {availableDates.map(date => (
-                <option key={date} value={date}>{date}</option>
-              ))}
+              {hasData ? (
+                activeCounty?.available_dates.map(date => (
+                  <option key={date} value={date}>{date}</option>
+                ))
+              ) : (
+                <option value="">No dates available</option>
+              )}
             </select>
           </div>
+
+          {/* Anomaly Toggle */}
+          <label className={`flex items-center gap-2 cursor-pointer bg-gray-800 px-4 py-2 rounded border border-gray-700 transition ${!hasData || activeCounty?.available_dates.length! < 2 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}>
+            <input 
+              type="checkbox" 
+              checked={showAnomalies}
+              onChange={(e) => setShowAnomalies(e.target.checked)}
+              disabled={!hasData || activeCounty?.available_dates.length! < 2}
+              className="w-4 h-4 accent-red-500 cursor-pointer"
+            />
+            <span className="text-sm font-bold text-red-400">Anomalies</span>
+          </label>
         </div>
       </header>
 
@@ -178,11 +241,21 @@ function App() {
         
         {/* Statistics Sidebar */}
         <div className="absolute top-6 left-6 bg-gray-800 p-5 rounded-lg shadow-xl opacity-95 border border-gray-700 w-72">
-          <h2 className="text-lg font-bold mb-1 text-green-400">Bungoma Pilot Area</h2>
-          <p className="text-xs text-gray-400 mb-4">{selectedDate}</p>
+          <h2 className="text-lg font-bold mb-1 text-green-400">
+            {selectedCounty} Analysis
+          </h2>
+          <p className="text-xs text-gray-400 mb-4">{selectedDate || "Overview Mode"}</p>
           
           {isLoading ? (
             <div className="text-gray-400 animate-pulse text-sm">Loading data...</div>
+          ) : statsError ? (
+            <div className="text-red-400 text-sm bg-red-900/20 p-3 rounded border border-red-900">
+              {statsError}
+            </div>
+          ) : !hasData ? (
+            <div className="text-yellow-400 text-sm bg-yellow-900/20 p-3 rounded border border-yellow-700/50">
+              No satellite data has been processed for this county yet.
+            </div>
           ) : stats ? (
             <div className="space-y-3 text-sm">
               <div className="flex justify-between items-center">
@@ -206,22 +279,24 @@ function App() {
         </div>
 
         {/* Opacity Slider */}
-        <div className="absolute bottom-6 left-6 bg-gray-800 p-4 rounded-lg shadow-xl opacity-95 border border-gray-700">
-          <label className="block text-sm font-medium mb-2">NDVI Layer Opacity</label>
-          <input 
-            type="range" min="0" max="1" step="0.1" value={opacity} 
-            onChange={(e) => setOpacity(parseFloat(e.target.value))}
-            className="w-48 cursor-pointer accent-green-500"
-          />
-          <div className="mt-4 flex items-center justify-between text-xs font-medium">
-            <div className="flex items-center gap-1">
-              <span className="bg-[#d73027] w-4 h-4 rounded-sm block"></span> <span>Stressed</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="bg-[#1a9850] w-4 h-4 rounded-sm block"></span> <span>Healthy</span>
+        {hasData && (
+          <div className="absolute bottom-6 left-6 bg-gray-800 p-4 rounded-lg shadow-xl opacity-95 border border-gray-700">
+            <label className="block text-sm font-medium mb-2">NDVI Layer Opacity</label>
+            <input 
+              type="range" min="0" max="1" step="0.1" value={opacity} 
+              onChange={(e) => setOpacity(parseFloat(e.target.value))}
+              className="w-48 cursor-pointer accent-green-500"
+            />
+            <div className="mt-4 flex items-center justify-between text-xs font-medium">
+              <div className="flex items-center gap-1">
+                <span className="bg-[#d73027] w-4 h-4 rounded-sm block"></span> <span>Stressed</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="bg-[#1a9850] w-4 h-4 rounded-sm block"></span> <span>Healthy</span>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );

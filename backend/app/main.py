@@ -2,6 +2,7 @@ from fastapi import FastAPI, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.health import router as health_router
 from app.api.v1.ndvi import router as ndvi_router
+from app.core.config import WESTERN_KENYA_COUNTIES
 from pathlib import Path
 import rasterio
 import numpy as np
@@ -24,25 +25,31 @@ processed_dir = base_dir / "data" / "processed"
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(ndvi_router, prefix="/api/v1")
 
-# Hardcoded to Bungoma only
-AVAILABLE_OBSERVATIONS = {
-    "Jan 2024": "Bungoma_NDVI_4326.tif",
-    "Jun 2024": "Bungoma_NDVI_4326_Jun2024.tif"
-}
+@app.get("/api/v1/counties")
+def get_counties():
+    response_data = []
+    for name, data in WESTERN_KENYA_COUNTIES.items():
+        response_data.append({
+            "name": name,
+            "center": data["center"],
+            "bounds": data["bounds"],
+            "available_dates": list(data["observations"].keys())
+        })
+    return response_data
 
-@app.get("/api/v1/observations")
-def get_observations():
-    return list(AVAILABLE_OBSERVATIONS.keys())
+def get_file_path(county: str, date: str) -> Path:
+    if county not in WESTERN_KENYA_COUNTIES:
+        raise HTTPException(status_code=404, detail=f"County '{county}' not supported")
+    county_data = WESTERN_KENYA_COUNTIES[county]
+    if date not in county_data["observations"]:
+        raise HTTPException(status_code=404, detail=f"No data available for {county} on {date}")
+    return processed_dir / county_data["observations"][date]
 
 @app.get("/api/v1/ndvi-image")
-def get_ndvi_image(date: str = "Jan 2024"):
-    filename = AVAILABLE_OBSERVATIONS.get(date)
-    if not filename:
-        raise HTTPException(status_code=400, detail="Invalid date selected")
-        
-    file_path = processed_dir / filename
+def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
+    file_path = get_file_path(county, date)
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File missing: {filename}")
+        raise HTTPException(status_code=404, detail=f"File missing on disk: {file_path.name}")
 
     with rasterio.open(file_path) as src:
         data = src.read(1)
@@ -69,14 +76,10 @@ def get_ndvi_image(date: str = "Jan 2024"):
         return Response(content=img_byte_arr.getvalue(), media_type="image/png")
 
 @app.get("/api/v1/ndvi-statistics")
-def get_ndvi_statistics(date: str = "Jan 2024"):
-    filename = AVAILABLE_OBSERVATIONS.get(date)
-    if not filename:
-        raise HTTPException(status_code=400, detail="Invalid date")
-        
-    file_path = processed_dir / filename
+def get_ndvi_statistics(county: str = "Bungoma", date: str = "Jan 2024"):
+    file_path = get_file_path(county, date)
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File missing")
+        raise HTTPException(status_code=404, detail="File missing on disk")
 
     with rasterio.open(file_path) as src:
         data = src.read(1)
@@ -91,22 +94,27 @@ def get_ndvi_statistics(date: str = "Jan 2024"):
         }
 
 @app.get("/api/v1/ndvi-anomaly")
-def get_ndvi_anomaly():
-    jan_file = processed_dir / "Bungoma_NDVI_4326.tif"
-    jun_file = processed_dir / "Bungoma_NDVI_4326_Jun2024.tif"
+def get_ndvi_anomaly(county: str = "Bungoma"):
+    if county not in WESTERN_KENYA_COUNTIES:
+        raise HTTPException(status_code=404, detail="County not supported")
     
-    if not jan_file.exists() or not jun_file.exists():
-        raise HTTPException(status_code=404, detail="Missing files for anomaly calculation")
+    county_data = WESTERN_KENYA_COUNTIES[county]
+    dates = list(county_data["observations"].keys())
+    
+    if len(dates) < 2:
+        raise HTTPException(status_code=400, detail="Need at least two observation dates to calculate anomalies.")
 
-    with rasterio.open(jan_file) as src_jan, rasterio.open(jun_file) as src_jun:
-        jan_data = np.nan_to_num(src_jan.read(1), nan=0.0)
-        jun_data = np.nan_to_num(src_jun.read(1), nan=0.0)
+    file1 = processed_dir / county_data["observations"][dates[0]]
+    file2 = processed_dir / county_data["observations"][dates[1]]
+
+    if not file1.exists() or not file2.exists():
+        raise HTTPException(status_code=404, detail="Missing source files for anomaly calculation.")
+
+    with rasterio.open(file1) as src1, rasterio.open(file2) as src2:
+        delta = np.nan_to_num(src2.read(1), nan=0.0) - np.nan_to_num(src1.read(1), nan=0.0)
         
-        delta = jun_data - jan_data
         rgba = np.zeros((delta.shape[0], delta.shape[1], 4), dtype=np.uint8)
-        
-        anomalies = delta < -0.15
-        rgba[anomalies] = [255, 0, 0, 255] 
+        rgba[delta < -0.15] = [255, 0, 0, 255] # Red anomalies
         
         img = Image.fromarray(rgba, 'RGBA')
         img_byte_arr = io.BytesIO()
