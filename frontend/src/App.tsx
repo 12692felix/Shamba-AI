@@ -17,29 +17,40 @@ function App() {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   
-  const [opacity, setOpacity] = useState(0.8);
-  const [stats, setStats] = useState<NDVIStats | null>(null);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>("Jan 2024");
   
-  // State for Anomaly Layer
+  const [stats, setStats] = useState<NDVIStats | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  
+  const [opacity, setOpacity] = useState<number>(0.8);
   const [showAnomalies, setShowAnomalies] = useState<boolean>(false);
 
+  // 1. Fetch available dates
   useEffect(() => {
-    fetch('http://127.0.0.1:8000/api/v1/observations')
+    // Using localhost instead of 127.0.0.1 to prevent Chrome pending issues
+    fetch('http://localhost:8000/api/v1/observations')
       .then((res) => res.json())
       .then((data) => setAvailableDates(data))
       .catch((err) => console.error("Failed to load dates:", err));
   }, []);
 
+  // 2. Fetch statistics when date changes
   useEffect(() => {
-    setStats(null); 
-    fetch(`http://127.0.0.1:8000/api/v1/ndvi-statistics?date=${encodeURIComponent(selectedDate)}`)
+    setIsLoading(true);
+    fetch(`http://localhost:8000/api/v1/ndvi-statistics?date=${encodeURIComponent(selectedDate)}`)
       .then((res) => res.json())
-      .then((data) => setStats(data))
-      .catch((err) => console.error("Failed to load stats:", err));
+      .then((data) => {
+        setStats(data);
+        setIsLoading(false);
+      })
+      .catch((err) => {
+        console.error(err);
+        setIsLoading(false);
+      });
   }, [selectedDate]);
 
+  // 3. Initialize Map
   useEffect(() => {
     if (map.current) return; 
 
@@ -52,23 +63,26 @@ function App() {
 
     map.current.on('load', () => {
       if (!map.current) return;
-
+      
+      // Find label layer to put map underneath
       const layers = map.current.getStyle().layers;
       let firstSymbolId: string | undefined;
       if (layers) {
         for (const layer of layers) {
-          if (layer.type === 'symbol') { 
-            firstSymbolId = layer.id;
-            break;
-          }
+          if (layer.type === 'symbol') { firstSymbolId = layer.id; break; }
         }
       }
 
-      // 1. Add NDVI Base Layer
+      // Add NDVI Source
       map.current.addSource('ndvi-raster', {
         type: 'image',
-        url: `http://127.0.0.1:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`,
-        coordinates: [[34.55, 0.60], [34.60, 0.60], [34.60, 0.55], [34.55, 0.55]]
+        url: `http://localhost:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`,
+        coordinates: [
+          [34.55, 0.60], // Top Left
+          [34.60, 0.60], // Top Right
+          [34.60, 0.55], // Bottom Right
+          [34.55, 0.55]  // Bottom Left
+        ]
       });
 
       map.current.addLayer({
@@ -78,47 +92,50 @@ function App() {
         paint: { 'raster-opacity': opacity }
       }, firstSymbolId);
 
-      // 2. Add Anomaly Layer (initially hidden with opacity 0)
+      // Add Anomaly Source
       map.current.addSource('anomaly-raster', {
         type: 'image',
-        url: 'http://127.0.0.1:8000/api/v1/ndvi-anomaly',
-        coordinates: [[34.55, 0.60], [34.60, 0.60], [34.60, 0.55], [34.55, 0.55]]
+        url: 'http://localhost:8000/api/v1/ndvi-anomaly',
+        coordinates: [
+          [34.55, 0.60],
+          [34.60, 0.60],
+          [34.60, 0.55],
+          [34.55, 0.55]
+        ]
       });
 
       map.current.addLayer({
         id: 'anomaly-layer',
         type: 'raster',
         source: 'anomaly-raster',
-        paint: { 
-          'raster-opacity': 0 // Start invisible
-        }
+        paint: { 'raster-opacity': 0 } // Hidden by default
       }, firstSymbolId);
     });
   }, []);
 
-  // Update NDVI image when selectedDate changes
+  // 4. Update NDVI image when date changes
   useEffect(() => {
     if (map.current && map.current.getSource('ndvi-raster')) {
       const source = map.current.getSource('ndvi-raster') as maplibregl.ImageSource;
       source.updateImage({
-        url: `http://127.0.0.1:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`
+        url: `http://localhost:8000/api/v1/ndvi-image?date=${encodeURIComponent(selectedDate)}`
       });
     }
   }, [selectedDate]);
 
-  // Toggle Anomaly Layer visibility
-  useEffect(() => {
-    if (map.current && map.current.getLayer('anomaly-layer')) {
-      map.current.setPaintProperty('anomaly-layer', 'raster-opacity', showAnomalies ? 1 : 0);
-    }
-  }, [showAnomalies]);
-
-  // Update base NDVI opacity
+  // 5. Handle Opacity
   useEffect(() => {
     if (map.current && map.current.getLayer('ndvi-layer')) {
       map.current.setPaintProperty('ndvi-layer', 'raster-opacity', opacity);
     }
   }, [opacity]);
+
+  // 6. Handle Anomaly Toggle
+  useEffect(() => {
+    if (map.current && map.current.getLayer('anomaly-layer')) {
+      map.current.setPaintProperty('anomaly-layer', 'raster-opacity', showAnomalies ? 1 : 0);
+    }
+  }, [showAnomalies]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-gray-900 text-white font-sans">
@@ -159,12 +176,14 @@ function App() {
       <main className="flex-grow relative">
         <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
         
-        <div className="absolute top-6 left-6 bg-gray-800 p-5 rounded-lg shadow-xl opacity-95 border border-gray-700 w-64">
-          <h2 className="text-lg font-bold mb-4 border-b border-gray-600 pb-2 text-green-400">
-            Field Analysis
-          </h2>
+        {/* Statistics Sidebar */}
+        <div className="absolute top-6 left-6 bg-gray-800 p-5 rounded-lg shadow-xl opacity-95 border border-gray-700 w-72">
+          <h2 className="text-lg font-bold mb-1 text-green-400">Bungoma Pilot Area</h2>
+          <p className="text-xs text-gray-400 mb-4">{selectedDate}</p>
           
-          {stats ? (
+          {isLoading ? (
+            <div className="text-gray-400 animate-pulse text-sm">Loading data...</div>
+          ) : stats ? (
             <div className="space-y-3 text-sm">
               <div className="flex justify-between items-center">
                 <span className="text-gray-400">Mean NDVI</span>
@@ -183,13 +202,10 @@ function App() {
                 <span className="font-mono text-green-300">{stats.valid_percentage}%</span>
               </div>
             </div>
-          ) : (
-            <div className="text-gray-400 animate-pulse text-sm">
-              Loading statistics...
-            </div>
-          )}
+          ) : null}
         </div>
 
+        {/* Opacity Slider */}
         <div className="absolute bottom-6 left-6 bg-gray-800 p-4 rounded-lg shadow-xl opacity-95 border border-gray-700">
           <label className="block text-sm font-medium mb-2">NDVI Layer Opacity</label>
           <input 
