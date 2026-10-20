@@ -53,11 +53,17 @@ def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
 
     with rasterio.open(file_path) as src:
         data = src.read(1)
+        
+        # 1. Identify valid pixels (where data is NOT NaN) BEFORE filling NaNs
+        valid_mask = ~np.isnan(data)
+        
+        # 2. Fill NaNs with 0.0 just so the color mapping math doesn't crash
         data = np.nan_to_num(data, nan=0.0)
         
         height, width = data.shape
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
         
+        # 3. Map colors
         mask_red = data < 0.2
         mask_yellow = (data >= 0.2) & (data < 0.4)
         mask_light_green = (data >= 0.4) & (data < 0.6)
@@ -67,6 +73,9 @@ def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
         rgba[mask_yellow] = [254, 224, 139, 255]  
         rgba[mask_light_green] = [217, 239, 139, 255] 
         rgba[mask_dark_green] = [26, 152, 80, 255]    
+        
+        # 4. CRITICAL FIX: Set all invalid/NoData pixels to completely transparent [0,0,0,0]
+        rgba[~valid_mask] = [0, 0, 0, 0]
         
         img = Image.fromarray(rgba, 'RGBA')
         img_byte_arr = io.BytesIO()
@@ -83,6 +92,7 @@ def get_ndvi_statistics(county: str = "Bungoma", date: str = "Jan 2024"):
 
     with rasterio.open(file_path) as src:
         data = src.read(1)
+        # We only calculate statistics on valid (non-NaN) pixels
         valid_data = data[~np.isnan(data)]
         
         return {
@@ -111,10 +121,23 @@ def get_ndvi_anomaly(county: str = "Bungoma"):
         raise HTTPException(status_code=404, detail="Missing source files for anomaly calculation.")
 
     with rasterio.open(file1) as src1, rasterio.open(file2) as src2:
-        delta = np.nan_to_num(src2.read(1), nan=0.0) - np.nan_to_num(src1.read(1), nan=0.0)
+        data1 = src1.read(1)
+        data2 = src2.read(1)
+        
+        # 1. Create a mask where BOTH dates have valid data
+        valid_mask = ~np.isnan(data1) & ~np.isnan(data2)
+        
+        # 2. Fill NaNs with 0.0 for the math
+        delta = np.nan_to_num(data2, nan=0.0) - np.nan_to_num(data1, nan=0.0)
         
         rgba = np.zeros((delta.shape[0], delta.shape[1], 4), dtype=np.uint8)
-        rgba[delta < -0.15] = [255, 0, 0, 255] # Red anomalies
+        
+        # 3. Flag anomalies (drop of more than 0.15)
+        anomalies = delta < -0.15
+        rgba[anomalies] = [255, 0, 0, 255] # Red anomalies
+        
+        # 4. CRITICAL FIX: Make sure invalid pixels are transparent
+        rgba[~valid_mask] = [0, 0, 0, 0]
         
         img = Image.fromarray(rgba, 'RGBA')
         img_byte_arr = io.BytesIO()

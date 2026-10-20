@@ -39,9 +39,7 @@ function App() {
   useEffect(() => {
     fetch('http://localhost:8000/api/v1/counties')
       .then((res) => res.json())
-      .then((data) => {
-        setCounties(data);
-      })
+      .then((data) => setCounties(data))
       .catch((err) => console.error("Failed to load counties:", err));
   }, []);
 
@@ -50,7 +48,10 @@ function App() {
 
   // 2. Set default date when county changes
   useEffect(() => {
-    if (activeCounty && activeCounty.available_dates.length > 0) {
+    if (selectedCounty === "Western Kenya") {
+      setSelectedDate("Overview");
+      setStats(null);
+    } else if (activeCounty && activeCounty.available_dates.length > 0) {
       setSelectedDate(activeCounty.available_dates[0]); 
     } else {
       setSelectedDate("");
@@ -58,9 +59,9 @@ function App() {
     }
   }, [selectedCounty, activeCounty]);
 
-  // 3. Fetch statistics when county or date changes
+  // 3. Fetch statistics when county or date changes (Only for specific counties)
   useEffect(() => {
-    if (!selectedCounty || !selectedDate || !hasData) return;
+    if (selectedCounty === "Western Kenya" || !selectedCounty || !selectedDate || !hasData) return;
     
     setIsLoading(true);
     setStatsError(null);
@@ -103,55 +104,91 @@ function App() {
     const updateMap = () => {
       if (!map.current) return;
 
-      // Handle Camera FlyTo
+      // 1. Handle Camera FlyTo
       if (selectedCounty === "Western Kenya") {
-        map.current.flyTo({ center: [34.4, 0.3], zoom: 7.5, essential: true });
+        map.current.flyTo({ center: [34.4, 0.3], zoom: 8, essential: true });
       } else if (activeCounty) {
         map.current.flyTo({ center: activeCounty.center, zoom: 11.5, essential: true });
       }
 
-      // Clean up existing layers
-      ['ndvi-layer', 'anomaly-layer'].forEach(id => {
-        if (map.current?.getLayer(id)) map.current.removeLayer(id);
-      });
-      ['ndvi-raster', 'anomaly-raster'].forEach(id => {
-        if (map.current?.getSource(id)) map.current.removeSource(id);
+      // 2. Clean up ALL previous layers and sources
+      counties.forEach(c => {
+        if (map.current?.getLayer(`ndvi-layer-${c.name}`)) map.current.removeLayer(`ndvi-layer-${c.name}`);
+        if (map.current?.getSource(`ndvi-raster-${c.name}`)) map.current.removeSource(`ndvi-raster-${c.name}`);
+        if (map.current?.getLayer(`anomaly-layer-${c.name}`)) map.current.removeLayer(`anomaly-layer-${c.name}`);
+        if (map.current?.getSource(`anomaly-raster-${c.name}`)) map.current.removeSource(`anomaly-raster-${c.name}`);
       });
 
-      // Add new layers if data exists
-      if (hasData && activeCounty && selectedDate) {
-        const layers = map.current.getStyle().layers;
-        let firstSymbolId: string | undefined;
-        if (layers) {
-          for (const layer of layers) {
-            if (layer.type === 'symbol') { firstSymbolId = layer.id; break; }
-          }
+      const layers = map.current.getStyle().layers;
+      let firstSymbolId: string | undefined;
+      if (layers) {
+        for (const layer of layers) {
+          if (layer.type === 'symbol') { firstSymbolId = layer.id; break; }
         }
+      }
 
-        map.current.addSource('ndvi-raster', {
+      // 3. Render Layers
+      if (selectedCounty === "Western Kenya") {
+        // RENDER ALL COUNTIES AT ONCE
+        counties.forEach(c => {
+          if (c.available_dates.length > 0) {
+            // Add NDVI
+            map.current?.addSource(`ndvi-raster-${c.name}`, {
+              type: 'image',
+              url: `http://localhost:8000/api/v1/ndvi-image?county=${encodeURIComponent(c.name)}&date=${encodeURIComponent(c.available_dates[0])}`,
+              coordinates: c.bounds
+            });
+
+            map.current?.addLayer({
+              id: `ndvi-layer-${c.name}`,
+              type: 'raster',
+              source: `ndvi-raster-${c.name}`,
+              paint: { 'raster-opacity': opacity }
+            }, firstSymbolId);
+
+            // Add Anomalies (Only Bungoma has 2 dates currently)
+            if (c.available_dates.length >= 2) {
+              map.current?.addSource(`anomaly-raster-${c.name}`, {
+                type: 'image',
+                url: `http://localhost:8000/api/v1/ndvi-anomaly?county=${encodeURIComponent(c.name)}`,
+                coordinates: c.bounds
+              });
+
+              map.current?.addLayer({
+                id: `anomaly-layer-${c.name}`,
+                type: 'raster',
+                source: `anomaly-raster-${c.name}`,
+                paint: { 'raster-opacity': showAnomalies ? 1 : 0 }
+              }, firstSymbolId);
+            }
+          }
+        });
+      } else if (activeCounty && hasData && selectedDate) {
+        // RENDER SINGLE SELECTED COUNTY
+        map.current.addSource(`ndvi-raster-${activeCounty.name}`, {
           type: 'image',
-          url: `http://localhost:8000/api/v1/ndvi-image?county=${encodeURIComponent(selectedCounty)}&date=${encodeURIComponent(selectedDate)}`,
+          url: `http://localhost:8000/api/v1/ndvi-image?county=${encodeURIComponent(activeCounty.name)}&date=${encodeURIComponent(selectedDate)}`,
           coordinates: activeCounty.bounds
         });
 
         map.current.addLayer({
-          id: 'ndvi-layer',
+          id: `ndvi-layer-${activeCounty.name}`,
           type: 'raster',
-          source: 'ndvi-raster',
+          source: `ndvi-raster-${activeCounty.name}`,
           paint: { 'raster-opacity': opacity }
         }, firstSymbolId);
 
         if (activeCounty.available_dates.length >= 2) {
-          map.current.addSource('anomaly-raster', {
+          map.current.addSource(`anomaly-raster-${activeCounty.name}`, {
             type: 'image',
-            url: `http://localhost:8000/api/v1/ndvi-anomaly?county=${encodeURIComponent(selectedCounty)}`,
+            url: `http://localhost:8000/api/v1/ndvi-anomaly?county=${encodeURIComponent(activeCounty.name)}`,
             coordinates: activeCounty.bounds
           });
 
           map.current.addLayer({
-            id: 'anomaly-layer',
+            id: `anomaly-layer-${activeCounty.name}`,
             type: 'raster',
-            source: 'anomaly-raster',
+            source: `anomaly-raster-${activeCounty.name}`,
             paint: { 'raster-opacity': showAnomalies ? 1 : 0 }
           }, firstSymbolId);
         }
@@ -163,21 +200,27 @@ function App() {
     } else {
       map.current.once('load', updateMap);
     }
-  }, [selectedCounty, selectedDate, activeCounty, hasData]);
+  }, [selectedCounty, selectedDate, activeCounty, hasData, counties]);
 
-  // Handle opacity
+  // 6. Update Opacity dynamically for all visible layers
   useEffect(() => {
-    if (map.current && map.current.getLayer('ndvi-layer')) {
-      map.current.setPaintProperty('ndvi-layer', 'raster-opacity', opacity);
-    }
-  }, [opacity]);
+    if (!map.current) return;
+    counties.forEach(c => {
+      if (map.current?.getLayer(`ndvi-layer-${c.name}`)) {
+        map.current.setPaintProperty(`ndvi-layer-${c.name}`, 'raster-opacity', opacity);
+      }
+    });
+  }, [opacity, counties]);
 
-  // Handle anomaly toggle
+  // 7. Update Anomaly Toggle dynamically
   useEffect(() => {
-    if (map.current && map.current.getLayer('anomaly-layer')) {
-      map.current.setPaintProperty('anomaly-layer', 'raster-opacity', showAnomalies ? 1 : 0);
-    }
-  }, [showAnomalies]);
+    if (!map.current) return;
+    counties.forEach(c => {
+      if (map.current?.getLayer(`anomaly-layer-${c.name}`)) {
+        map.current.setPaintProperty(`anomaly-layer-${c.name}`, 'raster-opacity', showAnomalies ? 1 : 0);
+      }
+    });
+  }, [showAnomalies, counties]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-gray-900 text-white font-sans">
@@ -188,7 +231,6 @@ function App() {
         </div>
         
         <div className="flex items-center gap-6">
-          {/* County Selector */}
           <div className="flex items-center gap-2">
             <label className="text-sm font-semibold text-green-200">County:</label>
             <select 
@@ -203,16 +245,17 @@ function App() {
             </select>
           </div>
 
-          {/* Date Selector */}
           <div className="flex items-center gap-2">
             <label className="text-sm font-semibold text-green-200">Date:</label>
             <select 
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
-              disabled={!hasData}
+              disabled={!hasData || selectedCounty === "Western Kenya"}
               className="bg-green-800 text-white text-sm px-4 py-2 rounded border border-green-700 focus:outline-none focus:border-green-500 cursor-pointer font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {hasData ? (
+              {selectedCounty === "Western Kenya" ? (
+                <option value="Overview">Overview Mode</option>
+              ) : hasData ? (
                 activeCounty?.available_dates.map(date => (
                   <option key={date} value={date}>{date}</option>
                 ))
@@ -222,13 +265,12 @@ function App() {
             </select>
           </div>
 
-          {/* Anomaly Toggle */}
-          <label className={`flex items-center gap-2 cursor-pointer bg-gray-800 px-4 py-2 rounded border border-gray-700 transition ${!hasData || activeCounty?.available_dates.length! < 2 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}>
+          <label className={`flex items-center gap-2 cursor-pointer bg-gray-800 px-4 py-2 rounded border border-gray-700 transition ${!hasData || selectedCounty === "Western Kenya" ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}>
             <input 
               type="checkbox" 
               checked={showAnomalies}
               onChange={(e) => setShowAnomalies(e.target.checked)}
-              disabled={!hasData || activeCounty?.available_dates.length! < 2}
+              disabled={!hasData || selectedCounty === "Western Kenya"}
               className="w-4 h-4 accent-red-500 cursor-pointer"
             />
             <span className="text-sm font-bold text-red-400">Anomalies</span>
@@ -239,14 +281,17 @@ function App() {
       <main className="flex-grow relative">
         <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
         
-        {/* Statistics Sidebar */}
         <div className="absolute top-6 left-6 bg-gray-800 p-5 rounded-lg shadow-xl opacity-95 border border-gray-700 w-72">
           <h2 className="text-lg font-bold mb-1 text-green-400">
             {selectedCounty} Analysis
           </h2>
-          <p className="text-xs text-gray-400 mb-4">{selectedDate || "Overview Mode"}</p>
+          <p className="text-xs text-gray-400 mb-4">{selectedDate}</p>
           
-          {isLoading ? (
+          {selectedCounty === "Western Kenya" ? (
+            <div className="text-green-400 text-sm bg-green-900/20 p-3 rounded border border-green-700/50">
+              Viewing all processed counties. Select a specific county from the dropdown to view detailed statistics and toggle anomalies.
+            </div>
+          ) : isLoading ? (
             <div className="text-gray-400 animate-pulse text-sm">Loading data...</div>
           ) : statsError ? (
             <div className="text-red-400 text-sm bg-red-900/20 p-3 rounded border border-red-900">
@@ -279,24 +324,22 @@ function App() {
         </div>
 
         {/* Opacity Slider */}
-        {hasData && (
-          <div className="absolute bottom-6 left-6 bg-gray-800 p-4 rounded-lg shadow-xl opacity-95 border border-gray-700">
-            <label className="block text-sm font-medium mb-2">NDVI Layer Opacity</label>
-            <input 
-              type="range" min="0" max="1" step="0.1" value={opacity} 
-              onChange={(e) => setOpacity(parseFloat(e.target.value))}
-              className="w-48 cursor-pointer accent-green-500"
-            />
-            <div className="mt-4 flex items-center justify-between text-xs font-medium">
-              <div className="flex items-center gap-1">
-                <span className="bg-[#d73027] w-4 h-4 rounded-sm block"></span> <span>Stressed</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <span className="bg-[#1a9850] w-4 h-4 rounded-sm block"></span> <span>Healthy</span>
-              </div>
+        <div className="absolute bottom-6 left-6 bg-gray-800 p-4 rounded-lg shadow-xl opacity-95 border border-gray-700">
+          <label className="block text-sm font-medium mb-2">NDVI Layer Opacity</label>
+          <input 
+            type="range" min="0" max="1" step="0.1" value={opacity} 
+            onChange={(e) => setOpacity(parseFloat(e.target.value))}
+            className="w-48 cursor-pointer accent-green-500"
+          />
+          <div className="mt-4 flex items-center justify-between text-xs font-medium">
+            <div className="flex items-center gap-1">
+              <span className="bg-[#d73027] w-4 h-4 rounded-sm block"></span> <span>Stressed</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="bg-[#1a9850] w-4 h-4 rounded-sm block"></span> <span>Healthy</span>
             </div>
           </div>
-        )}
+        </div>
       </main>
     </div>
   );
