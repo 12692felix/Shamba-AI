@@ -5,6 +5,8 @@ from app.api.v1.ndvi import router as ndvi_router
 from app.core.config import WESTERN_KENYA_COUNTIES
 from pathlib import Path
 import rasterio
+from rasterio.mask import mask
+import geopandas as gpd
 import numpy as np
 from PIL import Image
 import io
@@ -21,6 +23,7 @@ app.add_middleware(
 
 base_dir = Path(__file__).resolve().parent.parent.parent
 processed_dir = base_dir / "data" / "processed"
+geojson_path = base_dir / "backend" / "kenya-counties.geojson"
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(ndvi_router, prefix="/api/v1")
@@ -45,6 +48,21 @@ def get_file_path(county: str, date: str) -> Path:
         raise HTTPException(status_code=404, detail=f"No data available for {county} on {date}")
     return processed_dir / county_data["observations"][date]
 
+def get_county_shape(county_name: str):
+    """Loads the polygon shape for a specific county from the GeoJSON."""
+    if not geojson_path.exists():
+        return None
+    try:
+        gdf = gpd.read_file(geojson_path)
+        # The property is "NAME_1" as seen in the JSON
+        county_row = gdf[gdf['NAME_1'].str.lower() == county_name.lower()]
+        if county_row.empty:
+            return None
+        return [county_row.geometry.values[0]]
+    except Exception as e:
+        print(f"Error loading shape: {e}")
+        return None
+
 @app.get("/api/v1/ndvi-image")
 def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
     file_path = get_file_path(county, date)
@@ -54,16 +72,28 @@ def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
     with rasterio.open(file_path) as src:
         data = src.read(1)
         
-        # 1. Identify valid pixels (where data is NOT NaN) BEFORE filling NaNs
+        # --- CLIPPING LOGIC ---
+        shapes = get_county_shape(county)
+        if shapes:
+            try:
+                # crop=False keeps the image in the same bounding box, 
+                # but sets outside pixels to NaN
+                out_image, _ = mask(src, shapes, crop=False, nodata=np.nan)
+                data = out_image[0]
+            except Exception as e:
+                print(f"Masking failed, falling back to box: {e}")
+        # ----------------------
+
+        # Identify valid pixels
         valid_mask = ~np.isnan(data)
         
-        # 2. Fill NaNs with 0.0 just so the color mapping math doesn't crash
+        # Fill NaNs with 0.0 for color mapping
         data = np.nan_to_num(data, nan=0.0)
         
         height, width = data.shape
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
         
-        # 3. Map colors
+        # Map colors
         mask_red = data < 0.2
         mask_yellow = (data >= 0.2) & (data < 0.4)
         mask_light_green = (data >= 0.4) & (data < 0.6)
@@ -74,7 +104,7 @@ def get_ndvi_image(county: str = "Bungoma", date: str = "Jan 2024"):
         rgba[mask_light_green] = [217, 239, 139, 255] 
         rgba[mask_dark_green] = [26, 152, 80, 255]    
         
-        # 4. CRITICAL FIX: Set all invalid/NoData pixels to completely transparent [0,0,0,0]
+        # Make pixels outside the boundary transparent
         rgba[~valid_mask] = [0, 0, 0, 0]
         
         img = Image.fromarray(rgba, 'RGBA')
@@ -92,9 +122,21 @@ def get_ndvi_statistics(county: str = "Bungoma", date: str = "Jan 2024"):
 
     with rasterio.open(file_path) as src:
         data = src.read(1)
-        # We only calculate statistics on valid (non-NaN) pixels
+        
+        # CLIP FOR STATISTICS
+        shapes = get_county_shape(county)
+        if shapes:
+            try:
+                out_image, _ = mask(src, shapes, crop=False, nodata=np.nan)
+                data = out_image[0]
+            except Exception:
+                pass
+
         valid_data = data[~np.isnan(data)]
         
+        if len(valid_data) == 0:
+             raise HTTPException(status_code=400, detail="No valid pixels found inside this boundary.")
+             
         return {
             "mean": round(float(np.mean(valid_data)), 4),
             "min": round(float(np.min(valid_data)), 4),
@@ -124,19 +166,26 @@ def get_ndvi_anomaly(county: str = "Bungoma"):
         data1 = src1.read(1)
         data2 = src2.read(1)
         
-        # 1. Create a mask where BOTH dates have valid data
+        # CLIP BOTH FOR ANOMALY
+        shapes = get_county_shape(county)
+        if shapes:
+            try:
+                out_image1, _ = mask(src1, shapes, crop=False, nodata=np.nan)
+                out_image2, _ = mask(src2, shapes, crop=False, nodata=np.nan)
+                data1 = out_image1[0]
+                data2 = out_image2[0]
+            except Exception as e:
+                print(f"Anomaly masking failed: {e}")
+
         valid_mask = ~np.isnan(data1) & ~np.isnan(data2)
-        
-        # 2. Fill NaNs with 0.0 for the math
         delta = np.nan_to_num(data2, nan=0.0) - np.nan_to_num(data1, nan=0.0)
         
         rgba = np.zeros((delta.shape[0], delta.shape[1], 4), dtype=np.uint8)
         
-        # 3. Flag anomalies (drop of more than 0.15)
         anomalies = delta < -0.15
         rgba[anomalies] = [255, 0, 0, 255] # Red anomalies
         
-        # 4. CRITICAL FIX: Make sure invalid pixels are transparent
+        # Make outside pixels transparent
         rgba[~valid_mask] = [0, 0, 0, 0]
         
         img = Image.fromarray(rgba, 'RGBA')
